@@ -1,24 +1,9 @@
-# Copyright 2025 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 import logging
 import platform
 
 global logger
 logger = logging.getLogger('sf')
 
-#from https://gist.github.com/codergs/895f9d9a7564749a1e71ef567ddf0fdb
 class _AnsiColorStreamHandler(logging.StreamHandler):
     DEFAULT = '\x1b[0m'
     RED     = '\x1b[31m'
@@ -50,7 +35,6 @@ class _AnsiColorStreamHandler(logging.StreamHandler):
         return color + text + self.DEFAULT
 
 class _WinColorStreamHandler(logging.StreamHandler):
-    # wincon.h
     FOREGROUND_BLACK     = 0x0000
     FOREGROUND_BLUE      = 0x0001
     FOREGROUND_GREEN     = 0x0002
@@ -59,7 +43,7 @@ class _WinColorStreamHandler(logging.StreamHandler):
     FOREGROUND_MAGENTA   = 0x0005
     FOREGROUND_YELLOW    = 0x0006
     FOREGROUND_GREY      = 0x0007
-    FOREGROUND_INTENSITY = 0x0008 # foreground color is intensified.
+    FOREGROUND_INTENSITY = 0x0008
     FOREGROUND_WHITE     = FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED
 
     BACKGROUND_BLACK     = 0x0000
@@ -70,7 +54,7 @@ class _WinColorStreamHandler(logging.StreamHandler):
     BACKGROUND_MAGENTA   = 0x0050
     BACKGROUND_YELLOW    = 0x0060
     BACKGROUND_GREY      = 0x0070
-    BACKGROUND_INTENSITY = 0x0080 # background color is intensified.
+    BACKGROUND_INTENSITY = 0x0080
 
     DEFAULT  = FOREGROUND_WHITE
     CRITICAL = BACKGROUND_YELLOW | FOREGROUND_RED | FOREGROUND_INTENSITY | BACKGROUND_INTENSITY
@@ -94,9 +78,7 @@ class _WinColorStreamHandler(logging.StreamHandler):
 
     def __init__(self, stream=None):
         logging.StreamHandler.__init__(self, stream)
-        # get file handle for the stream
         import ctypes, ctypes.util
-        # for some reason find_msvcrt() sometimes doesn't find msvcrt.dll on my system?
         crtname = ctypes.util.find_msvcrt()
         if not crtname:
             crtname = ctypes.util.find_library("msvcrt")
