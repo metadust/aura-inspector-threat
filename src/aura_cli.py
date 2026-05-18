@@ -1,18 +1,3 @@
-# Copyright 2025 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-
 from aura_helper import AuraHelper
 from datetime import date
 from colored_logger import init_logger,logger,add_logging_level
@@ -24,11 +9,10 @@ import os
 import signal
 from urllib.parse import parse_qs
 
-def audit(url, cookies, object_list, output_dir, proxy, fetch_max_data=False, insecure=False, app=None, aura_path="/aura", context=None, token="null", no_gql=False):
+def audit(url, cookies, object_list, output_dir, proxy, fetch_max_data=False, insecure=False, app=None, aura_path="/aura", context=None, token="null", no_gql=False, experimental=False):
 
 	aura = AuraHelper(url=url, cookies=cookies, proxy=proxy, insecure=insecure, app=app, aura=aura_path, context=context, token=token)
 
-	# Check for self-registration
 	aura.check_self_registration_enabled()
 	aura.check_rest_api_enabled()
 	aura.check_soap_api_enabled()
@@ -37,7 +21,6 @@ def audit(url, cookies, object_list, output_dir, proxy, fetch_max_data=False, in
 
 	custom_controllers = aura.get_custom_controllers()
 
-	# Get all Salesforce Objects and CSP trusted list
 	all_objects = aura.get_objects()
 	objects = all_objects
 	if object_list:
@@ -58,19 +41,120 @@ def audit(url, cookies, object_list, output_dir, proxy, fetch_max_data=False, in
 
 	all_records = []
 	all_records_gql = []
-	if not fetch_max_data:
-		# Get records of all objects
-		all_records = aura.get_records(objects)
-		if aura.gql_enabled:
-			all_records_gql = aura.get_records_graphql(objects, records_per_action=100, fetch_all=False)
+	all_records = aura.get_records(objects, fetch_all=fetch_max_data)
+	if aura.gql_enabled:
+		all_records_gql = aura.get_records_graphql(objects, records_per_action=100, fetch_all=fetch_max_data)
 	all_ui_lists = dict()
 
-
-	# Get UI list for records
 	recordlists = aura.get_records_ui_list(objects)
 
 	home_urls = aura.get_object_home_urls()
 	
+	exploit_results = {}
+	auth_aura = None
+	if experimental:
+		logger.warning('--- Experimental mode enabled ---')
+
+		self_reg = aura.try_self_registration()
+		if self_reg and self_reg.get('sid'):
+			logger.warning(f'--- Re-running audit with authenticated session (SID: {self_reg["sid"][:20]}...) ---')
+			auth_cookies = f'sid={self_reg["sid"]}'
+			exploit_results['self_reg'] = {
+				'email': self_reg['email'],
+				'username': self_reg['username'],
+				'password': self_reg['password'],
+				'sid': self_reg['sid'],
+			}
+			try:
+				auth_aura = AuraHelper(url=url, cookies=auth_cookies, proxy=proxy, insecure=insecure, app=app, aura=aura_path, context=context, token=token)
+				auth_aura.check_graphql_enabled()
+				auth_all_objects = auth_aura.get_objects()
+				auth_objects = [o for o in auth_all_objects if o in objects or o.lower() in [x.lower() for x in objects]]
+				if not auth_objects:
+					auth_objects = auth_all_objects
+
+				auth_records = auth_aura.get_records(auth_objects, fetch_all=fetch_max_data)
+				if auth_records:
+					exploit_results['authenticated_records_summary'] = {k: v.get('total_count', 0) for k, v in auth_records.items() if v.get('total_count', 0) > 0}
+					all_records.update(auth_records)
+
+				if auth_aura.gql_enabled:
+					auth_gql = auth_aura.get_records_graphql(auth_objects, records_per_action=100, fetch_all=fetch_max_data)
+					if auth_gql:
+						exploit_results['authenticated_gql_summary'] = {k: v.get('total_count', 0) for k, v in auth_gql.items() if v.get('total_count', 0) > 0}
+						all_records_gql.update(auth_gql)
+
+				full_details = auth_aura.get_records_full(all_records, target_objects=None)
+				if full_details:
+					exploit_results['auth_full_record_details'] = {k: len(v) for k, v in full_details.items()}
+
+				targeted = auth_aura.query_graphql_filtered(
+					'User',
+					fields=['Id', 'Username', 'Email', 'FirstName', 'LastName', 'IsActive', 'ProfileId', 'UserType', 'LastLoginDate'],
+					limit=500
+				)
+				if targeted:
+					exploit_results['authenticated_users'] = targeted
+
+			except Exception as e:
+				logger.error(f'Authenticated re-audit failed: {e}')
+
+		fallback_records = aura.get_records_list_action(objects)
+		if fallback_records:
+			logger.warning(f'getList recovered {len(fallback_records)} objects that getItems missed')
+			exploit_results['getlist_fallback'] = fallback_records
+
+		additional_ctrl = aura.discover_additional_controllers()
+		if additional_ctrl:
+			exploit_results['additional_controllers'] = additional_ctrl
+
+		user_enum = aura.enumerate_users_forgot_password()
+		if user_enum:
+			exploit_results['user_enumeration'] = user_enum
+
+		combined_records = {}
+		combined_records.update(all_records)
+		combined_records.update(all_records_gql)
+		extractor = auth_aura if auth_aura else aura
+		full_details = extractor.get_records_full(combined_records, target_objects=None)
+		if full_details:
+			exploit_results['full_record_details'] = {k: len(v) for k, v in full_details.items()}
+
+		logger.info('Running targeted GraphQL queries...')
+		targets = [
+			('User', ['Id', 'Username', 'Email', 'FirstName', 'LastName', 'IsActive', 'ProfileId', 'UserType', 'LastLoginDate', 'CreatedDate']),
+			('Account', ['Id', 'Name', 'Type', 'Industry', 'Phone', 'Website', 'OwnerId']),
+			('Contact', ['Id', 'Name', 'Email', 'Phone', 'Title', 'AccountId']),
+			('ContentVersion', ['Id', 'Title', 'FileExtension', 'ContentDocumentId', 'CreatedDate', 'OwnerId', 'FileType', 'ContentSize']),
+			('KnowledgeArticleVersion', ['Id', 'Title', 'Summary', 'UrlName', 'LastPublishedDate', 'KnowledgeArticleId']),
+		]
+		query_aura = auth_aura if auth_aura else aura
+		targeted_results = {}
+		for obj_name, fields in targets:
+			if obj_name in objects or obj_name.lower() in [o.lower() for o in objects]:
+				records = query_aura.query_graphql_filtered(obj_name, fields=fields, limit=500)
+				if records:
+					targeted_results[obj_name] = records
+					logger.warning(f'Extracted {len(records)} {obj_name} records via targeted GraphQL')
+		if targeted_results:
+			exploit_results['targeted_graphql'] = targeted_results
+
+		content_doc_ids = []
+		for obj_name, data in combined_records.items():
+			if obj_name in ('ContentVersion', 'ContentDocument') and data.get('records'):
+				for rec in data.get('records', []):
+					rid = rec.get('Id', {})
+					if isinstance(rid, dict):
+						rid = rid.get('value')
+					if rid:
+						content_doc_ids.append(rid)
+
+		if content_doc_ids:
+			logger.info(f'Attempting to download {len(content_doc_ids)} files...')
+			downloaded = aura.get_content_files(content_doc_ids)
+			if downloaded:
+				exploit_results['downloaded_files'] = {k: 'downloaded' for k in downloaded}
+
 	print('')
 	print('--- Summary ---')
 	print(draw_table(all_records))
@@ -79,6 +163,9 @@ def audit(url, cookies, object_list, output_dir, proxy, fetch_max_data=False, in
 		print('--- Summary GraphQL ---')
 		print(draw_table(all_records_gql))
 		print('')
+	if experimental and exploit_results:
+		print('--- Experimental Findings ---')
+		print(json.dumps({k: f'{len(v)} items' if isinstance(v, (list, dict)) else v for k, v in exploit_results.items()}, indent=2))
 
 	if not output_dir:
 		while True:
@@ -100,7 +187,9 @@ def audit(url, cookies, object_list, output_dir, proxy, fetch_max_data=False, in
 		write_misc_to_directory(home_urls, output_dir, sub_dir='misc',file_name='homeurls.json')
 		write_misc_to_directory(aura.csp_trusted, output_dir, sub_dir='misc',file_name='csp_trusted_sites.json')
 		write_misc_to_directory(custom_controllers, output_dir, sub_dir='misc',file_name='custom_controllers.json')
-		
+		if experimental and exploit_results:
+			write_misc_to_directory(exploit_results, output_dir, sub_dir='misc', file_name='experimental_findings.json')
+
 		logger.info(f'Please check the {output_dir} folder for retrieved records, object home URLs and records UI list record URLs')
 		logger.warning('The object home URLs and records UI list need to be checked manually at the moment to verify whether any sensitive data or panel is available')
 
@@ -116,6 +205,12 @@ def write_records_to_directory(all_records, parent_dir, sub_dir):
 	logger.info(f'Writing record information to {path_to_write}')
 	with open(os.path.join(path_to_write, f'summary.txt'), 'w') as f:
 		f.write(draw_table(all_records))
+
+	for object_name, data in all_records.items():
+		if data.get('records') and len(data.get('records')) > 0:
+			file_path = os.path.join(path_to_write, f'{object_name}.json')
+			with open(file_path, 'w') as f:
+				json.dump(data, f, indent=4)
 
 
 def write_misc_to_directory(obj_to_write, parent_dir, sub_dir='misc', file_name=''):
@@ -175,14 +270,11 @@ def parse_http_request_file(http_req_file):
 
 	headers = {}
 
-	# We only need the Host and Cookie headers
 	for line in http_request[1:]:
 
-		# If the line is empty, it marks the end of headers
 		if line.strip() == '':
 			break
 
-		# Split the line into key and value
 		key, value = line.split(':', 1)
 		if key.lower().strip() == 'host':
 			headers['host'] = value.strip()
@@ -223,9 +315,11 @@ def main():
 	parser.add_argument("--aura", help="Provide the target salesforce aura's path (e.g: /aura), the script will try to detect it if not provided")
 	parser.add_argument("--context", help="Provide a context to be used as aura.context in POST requests, the script will use a dummy one if not provided")
 	parser.add_argument("--token", help="Provide an aura token to be used as aura.token in POST requests, the script will use a dummy one if not provided")
+	parser.add_argument("--fetch-data", help="Fetch and save the actual records and metadata instead of just counting", action="store_true")
 	parser.add_argument("--no-gql", help="Do not check for GraphQL capability and do not use it", action="store_true")
 	parser.add_argument("--no-banner", help="Do not display banner", action="store_true")
 	parser.add_argument("-r", "--aura-request-file", help="Provide a request file to an /aura endpoint")
+	parser.add_argument("-x", "--experimental", help="Enable experimental extraction techniques (getRecord, getList, user enum, file downloads, controller probing, targeted GQL)", action="store_true")
 
 	args = parser.parse_args()
 
@@ -254,7 +348,6 @@ def main():
 	token = args.token
 	context = args.context
 
-	# If request file exists, parse it and ignore the url
 	if args.aura_request_file:
 		parsed_http_req = parse_http_request_file(args.aura_request_file)
 		
@@ -285,12 +378,14 @@ def main():
 		object_list=object_list,
 		output_dir=args.output_dir,
 		proxy=args.proxy,
+		fetch_max_data=args.fetch_data,
 		insecure=args.insecure,
 		app=app,
 		aura_path=aura,
 		context=context,
 		token=token,
-		no_gql=args.no_gql
+		no_gql=args.no_gql,
+		experimental=args.experimental
     )
 
 if __name__ == "__main__":
